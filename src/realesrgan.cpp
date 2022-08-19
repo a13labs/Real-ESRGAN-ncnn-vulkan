@@ -56,6 +56,10 @@ RealESRGAN::RealESRGAN(int gpuid, bool _tta_mode)
 
     realesrgan_preproc = 0;
     realesrgan_postproc = 0;
+    // This is used to fix the when using scale = 1
+    // looks like the size comming from the model is always 4x
+    // so we need to downsscale
+    bicubic_reduce_quarter = 0;
     bicubic_2x = 0;
     bicubic_3x = 0;
     bicubic_4x = 0;
@@ -69,6 +73,9 @@ RealESRGAN::~RealESRGAN()
         delete realesrgan_preproc;
         delete realesrgan_postproc;
     }
+
+    bicubic_reduce_quarter->destroy_pipeline(net.opt);
+    delete bicubic_reduce_quarter;
 
     bicubic_2x->destroy_pipeline(net.opt);
     delete bicubic_2x;
@@ -161,6 +168,20 @@ int RealESRGAN::load(const std::string& parampath, const std::string& modelpath)
             else
                 realesrgan_postproc->create(realesrgan_postproc_spv_data, sizeof(realesrgan_postproc_spv_data), specializations);
         }
+    }
+
+    // downscale 4x for fixing 1->1 scaling
+    {
+        bicubic_reduce_quarter = ncnn::create_layer("Interp");
+        bicubic_reduce_quarter->vkdev = net.vulkan_device();
+
+        ncnn::ParamDict pd;
+        pd.set(0, 3); // bicubic
+        pd.set(1, 0.25f);
+        pd.set(2, 0.25f);
+        bicubic_reduce_quarter->load_param(pd);
+
+        bicubic_reduce_quarter->create_pipeline(net.opt);
     }
 
     // bicubic 2x/3x/4x for alpha channel
@@ -492,6 +513,13 @@ int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
                     ex.extract("output", out_tile_gpu, cmd);
                 }
 
+                // down scale tile to the right size 
+                if (scale == 1) {
+                    ncnn::VkMat scaled_out_tile;
+                    bicubic_reduce_quarter->forward(out_tile_gpu, scaled_out_tile, cmd, opt);
+                    out_tile_gpu = scaled_out_tile;
+                }
+
                 ncnn::VkMat out_alpha_tile_gpu;
                 if (channels == 4)
                 {
@@ -550,7 +578,7 @@ int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
                 cmd.reset();
             }
 
-            fprintf(stderr, "%.2f%%\n", (float)(yi * xtiles + xi) / (ytiles * xtiles) * 100);
+            // fprintf(stderr, "%.2f%%\n", (float)(yi * xtiles + xi) / (ytiles * xtiles) * 100);
         }
 
         // download
